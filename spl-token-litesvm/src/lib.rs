@@ -22,8 +22,8 @@ use spl_token_2022_interface::extension::{
     scaled_ui_amount::ScaledUiAmountConfig,
     transfer_fee::{TransferFeeAmount, TransferFeeConfig},
     transfer_hook::{TransferHook, TransferHookAccount},
-    BaseState, BaseStateWithExtensions, BaseStateWithExtensionsMut, Extension, StateWithExtensions,
-    StateWithExtensionsMut,
+    BaseStateWithExtensions, BaseStateWithExtensionsMut, Extension, ExtensionType,
+    StateWithExtensions, StateWithExtensionsMut,
 };
 use spl_token_group_interface::state::{TokenGroup, TokenGroupMember};
 use spl_token_metadata_interface::state::TokenMetadata;
@@ -110,13 +110,12 @@ fn put_account(
         .map_err(|_| ProgramError::InvalidAccountData)
 }
 
-fn append_fixed_extension<S, V>(
+fn append_fixed_token_account_extension<V>(
     svm: &mut LiteSVM,
     pubkey: &Pubkey,
     extension: V,
 ) -> Result<(), ProgramError>
 where
-    S: BaseState + Pack,
     V: Extension + bytemuck::Pod + Default + Copy,
 {
     let mut account = svm
@@ -127,7 +126,8 @@ where
     }
 
     let new_len = {
-        let state = StateWithExtensions::<S>::unpack(&account.data)?;
+        let state =
+            StateWithExtensions::<spl_token_2022_interface::state::Account>::unpack(&account.data)?;
         if state.get_extension_bytes::<V>().is_ok() {
             return Ok(());
         }
@@ -137,9 +137,67 @@ where
     if account.data.len() < new_len {
         account.data.resize(new_len, 0);
     }
-    spl_token_2022_interface::extension::set_account_type::<S>(&mut account.data)?;
+    spl_token_2022_interface::extension::set_account_type::<
+        spl_token_2022_interface::state::Account,
+    >(&mut account.data)?;
 
-    let mut state = StateWithExtensionsMut::<S>::unpack(&mut account.data)?;
+    let mut state = StateWithExtensionsMut::<spl_token_2022_interface::state::Account>::unpack(
+        &mut account.data,
+    )?;
+    let extension_ref = state.init_extension::<V>(false)?;
+    *extension_ref = extension;
+
+    put_account(svm, pubkey, account)
+}
+
+fn validate_mint_extension_combination<V>(
+    state: &StateWithExtensions<spl_token_2022_interface::state::Mint>,
+) -> Result<(), ProgramError>
+where
+    V: Extension,
+{
+    let mut extension_types = state.get_extension_types()?;
+    if !extension_types.contains(&V::TYPE) {
+        extension_types.push(V::TYPE);
+    }
+    ExtensionType::check_for_invalid_mint_extension_combinations(&extension_types)
+        .map_err(ProgramError::from)
+}
+
+fn append_fixed_mint_extension<V>(
+    svm: &mut LiteSVM,
+    pubkey: &Pubkey,
+    extension: V,
+) -> Result<(), ProgramError>
+where
+    V: Extension + bytemuck::Pod + Default + Copy,
+{
+    let mut account = svm
+        .get_account(pubkey)
+        .ok_or(ProgramError::InvalidAccountData)?;
+    if account.owner != spl_token_2022_interface::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let new_len = {
+        let state =
+            StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(&account.data)?;
+        if state.get_extension_bytes::<V>().is_ok() {
+            return Ok(());
+        }
+        validate_mint_extension_combination::<V>(&state)?;
+        state.try_get_new_account_len::<V>()?
+    };
+
+    if account.data.len() < new_len {
+        account.data.resize(new_len, 0);
+    }
+    spl_token_2022_interface::extension::set_account_type::<spl_token_2022_interface::state::Mint>(
+        &mut account.data,
+    )?;
+
+    let mut state =
+        StateWithExtensionsMut::<spl_token_2022_interface::state::Mint>::unpack(&mut account.data)?;
     let extension_ref = state.init_extension::<V>(false)?;
     *extension_ref = extension;
 
@@ -167,6 +225,7 @@ where
         if state.get_extension_bytes::<V>().is_ok() {
             return Ok(());
         }
+        validate_mint_extension_combination::<V>(&state)?;
         state.try_get_new_account_len_for_variable_len_extension(extension)?
     };
 
@@ -192,7 +251,7 @@ fn append_mint_extension<V>(
 where
     V: Extension + bytemuck::Pod + Default + Copy,
 {
-    append_fixed_extension::<spl_token_2022_interface::state::Mint, V>(svm, mint, extension)
+    append_fixed_mint_extension(svm, mint, extension)
 }
 
 fn append_variable_len_mint_extension<V>(
@@ -214,11 +273,7 @@ fn append_token_account_extension<V>(
 where
     V: Extension + bytemuck::Pod + Default + Copy,
 {
-    append_fixed_extension::<spl_token_2022_interface::state::Account, V>(
-        svm,
-        token_account,
-        extension,
-    )
+    append_fixed_token_account_extension(svm, token_account, extension)
 }
 
 macro_rules! mint_extension_initializer {
@@ -345,7 +400,6 @@ pub fn add_tokens_to_token_account(svm: &mut LiteSVM, token_account_pubkey: &Pub
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spl_token_2022_interface::extension::ExtensionType;
 
     #[test]
     fn initializes_mint_extension_once() {
@@ -487,5 +541,44 @@ mod tests {
                 .unwrap();
         let extension = state.get_variable_len_extension::<TokenMetadata>().unwrap();
         assert_eq!(extension.name, "Test Token");
+    }
+
+    #[test]
+    fn rejects_invalid_mint_extension_combination() {
+        let mut svm = LiteSVM::new();
+        let token_program = spl_token_2022_interface::id();
+        let mint = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+
+        setup_token_mint(&mut svm, &mint, 6, &authority, &token_program);
+
+        initialize_scaled_ui_amount_config_extension(
+            &mut svm,
+            &mint,
+            ScaledUiAmountConfig::default(),
+        )
+        .unwrap();
+
+        let len = svm.get_account(&mint).unwrap().data.len();
+        let err = initialize_interest_bearing_config_extension(
+            &mut svm,
+            &mint,
+            InterestBearingConfig::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            ProgramError::from(
+                spl_token_2022_interface::error::TokenError::InvalidExtensionCombination
+            )
+        );
+        let account = svm.get_account(&mint).unwrap();
+        assert_eq!(account.data.len(), len);
+        let state =
+            StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(&account.data)
+                .unwrap();
+        assert!(state.get_extension::<ScaledUiAmountConfig>().is_ok());
+        assert!(state.get_extension::<InterestBearingConfig>().is_err());
     }
 }
