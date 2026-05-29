@@ -4,7 +4,7 @@ use solana_account_view::{AccountView, Ref};
 
 pub use pinocchio_token_2022::instructions;
 
-use pinocchio_token_2022::state::TokenAccount as T22TokenAccount;
+use pinocchio_token_2022::state::Account as T22TokenAccount;
 
 const EXTENSION_TYPE_LEN: usize = 2;
 const EXTENSION_LENGTH_LEN: usize = 2;
@@ -48,37 +48,12 @@ impl ExtensionType {
 
 pub struct TokenAccount<'info>(Ref<'info, T22TokenAccount>);
 
-/// Size of multisig account for TokenAccount and Mint.
-pub const MULTISIG_ACCOUNT_LENGTH: usize = 355;
-
-/// Get the account type for a T22 account.
-pub fn get_account_type(account_view: &AccountView) -> Result<u8, ProgramError> {
-    let data = account_view.try_borrow()?;
-    // Account type is at byte 165 (`T22TokenAccount::BASE_LEN`) for extensible T22 accounts.
-    let account_type = data[T22TokenAccount::BASE_LEN];
-    Ok(account_type)
-}
-
 impl<'info> TokenAccount<'info> {
     pub fn from_account_view(account_view: &'info AccountView) -> Result<Self, ProgramError> {
         if account_view.owned_by(&pinocchio_token_2022::ID) {
-            let data_len = account_view.data_len();
-            if data_len > T22TokenAccount::BASE_LEN {
-                let account_type = get_account_type(account_view)?;
-                // Token holding account must have account type 2.
-                if account_type != T22_ACCOUNT_TYPE_TOKEN_ACCOUNT {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                // Multisig accounts are not supported.
-                if data_len == MULTISIG_ACCOUNT_LENGTH {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-            }
-            T22TokenAccount::from_account_view(account_view)
-                .map(TokenAccount)
-                .map_err(|_| ProgramError::InvalidAccountData)
+            T22TokenAccount::from_account_view(account_view).map(TokenAccount)
         } else if account_view.owned_by(&pinocchio_token::ID) {
-            if account_view.data_len() != pinocchio_token::state::TokenAccount::LEN {
+            if account_view.data_len() != pinocchio_token::state::Account::LEN {
                 return Err(ProgramError::InvalidAccountData);
             }
             // SAFETY: Legacy Token and Token-2022 token account structs share the same base layout.
@@ -87,7 +62,7 @@ impl<'info> TokenAccount<'info> {
                 |data| unsafe { T22TokenAccount::from_bytes_unchecked(data) },
             )))
         } else {
-            Err(ProgramError::InvalidAccountData)
+            Err(ProgramError::InvalidAccountOwner)
         }
     }
 }
@@ -105,23 +80,7 @@ pub struct Mint<'info>(Ref<'info, pinocchio_token_2022::state::Mint>);
 impl<'info> Mint<'info> {
     pub fn from_account_view(account_view: &'info AccountView) -> Result<Self, ProgramError> {
         if account_view.owned_by(&pinocchio_token_2022::ID) {
-            let data_len = account_view.data_len();
-            // Use `T22TokenAccount::BASE_LEN` (165) as threshold — that is where the account-type
-            // byte lives for all extensible T22 accounts, including Mints.
-            if data_len > T22TokenAccount::BASE_LEN {
-                let account_type = get_account_type(account_view)?;
-                // Mint must have account type 1.
-                if account_type != T22_ACCOUNT_TYPE_MINT {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                // Multisig accounts are not supported.
-                if data_len == MULTISIG_ACCOUNT_LENGTH {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-            }
-            pinocchio_token_2022::state::Mint::from_account_view(account_view)
-                .map(Mint)
-                .map_err(|_| ProgramError::InvalidAccountData)
+            pinocchio_token_2022::state::Mint::from_account_view(account_view).map(Mint)
         } else if account_view.owned_by(&pinocchio_token::ID) {
             if account_view.data_len() != pinocchio_token::state::Mint::LEN {
                 return Err(ProgramError::InvalidAccountData);
@@ -131,7 +90,7 @@ impl<'info> Mint<'info> {
                 pinocchio_token_2022::state::Mint::from_bytes_unchecked(data)
             })))
         } else {
-            Err(ProgramError::InvalidAccountData)
+            Err(ProgramError::InvalidAccountOwner)
         }
     }
 }
@@ -238,7 +197,7 @@ mod tests {
 
     #[test]
     fn token_account_t22_multisig_length() {
-        let mut data = vec![0u8; MULTISIG_ACCOUNT_LENGTH];
+        let mut data = vec![0u8; pinocchio_token_2022::state::Multisig::LEN];
         data[T22TokenAccount::BASE_LEN] = T22_ACCOUNT_TYPE_TOKEN_ACCOUNT;
         let (_buf, view) = make_account(t22_id(), data);
         assert_eq!(
@@ -249,7 +208,7 @@ mod tests {
 
     #[test]
     fn token_account_legacy_success() {
-        let data = vec![0u8; pinocchio_token::state::TokenAccount::LEN];
+        let data = vec![0u8; pinocchio_token::state::Account::LEN];
         let (_buf, view) = make_account(token_id(), data);
         assert!(TokenAccount::from_account_view(&view).is_ok());
     }
@@ -270,7 +229,7 @@ mod tests {
         let (_buf, view) = make_account([0u8; 32], data);
         assert_eq!(
             TokenAccount::from_account_view(&view).err().unwrap(),
-            ProgramError::InvalidAccountData,
+            ProgramError::InvalidAccountOwner,
         );
     }
 
@@ -325,7 +284,7 @@ mod tests {
         let (_buf, view) = make_account([0u8; 32], data);
         assert_eq!(
             Mint::from_account_view(&view).err().unwrap(),
-            ProgramError::InvalidAccountData,
+            ProgramError::InvalidAccountOwner,
         );
     }
 
