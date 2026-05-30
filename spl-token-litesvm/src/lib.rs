@@ -29,6 +29,12 @@ use spl_token_group_interface::state::{TokenGroup, TokenGroupMember};
 use spl_token_metadata_interface::state::TokenMetadata;
 use spl_type_length_value::variable_len_pack::VariableLenPack;
 
+mod account_builder;
+mod mint_builder;
+
+pub use account_builder::TokenAccountBuilder;
+pub use mint_builder::MintBuilder;
+
 pub const SPL_TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
     pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
@@ -110,6 +116,113 @@ fn put_account(
         .map_err(|_| ProgramError::InvalidAccountData)
 }
 
+fn ensure_mint_extension_layout(data: &mut [u8]) -> Result<(), ProgramError> {
+    if data.len() > spl_token_2022_interface::state::Mint::LEN {
+        spl_token_2022_interface::extension::set_account_type::<
+            spl_token_2022_interface::state::Mint,
+        >(data)?;
+    }
+    Ok(())
+}
+
+fn ensure_token_account_extension_layout(data: &mut [u8]) -> Result<(), ProgramError> {
+    if data.len() > spl_token_2022_interface::state::Account::LEN {
+        spl_token_2022_interface::extension::set_account_type::<
+            spl_token_2022_interface::state::Account,
+        >(data)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn init_fixed_mint_extension_data<V>(
+    data: &mut Vec<u8>,
+    extension: V,
+) -> Result<bool, ProgramError>
+where
+    V: Extension + bytemuck::Pod + Default + Copy,
+{
+    // Builder-created buffers can already be extended before their first TLV parse.
+    ensure_mint_extension_layout(data)?;
+    let new_len = {
+        let state = StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(data)?;
+        if state.get_extension_bytes::<V>().is_ok() {
+            return Ok(false);
+        }
+        validate_mint_extension_combination::<V>(&state)?;
+        state.try_get_new_account_len::<V>()?
+    };
+
+    if data.len() < new_len {
+        data.resize(new_len, 0);
+    }
+    // Append-created buffers become extended only after resizing.
+    ensure_mint_extension_layout(data)?;
+
+    let mut state = StateWithExtensionsMut::<spl_token_2022_interface::state::Mint>::unpack(data)?;
+    let extension_ref = state.init_extension::<V>(false)?;
+    *extension_ref = extension;
+    Ok(true)
+}
+
+pub(crate) fn init_variable_len_mint_extension_data<V>(
+    data: &mut Vec<u8>,
+    extension: &V,
+) -> Result<bool, ProgramError>
+where
+    V: Extension + VariableLenPack,
+{
+    // Builder-created buffers can already be extended before their first TLV parse.
+    ensure_mint_extension_layout(data)?;
+    let new_len = {
+        let state = StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(data)?;
+        if state.get_extension_bytes::<V>().is_ok() {
+            return Ok(false);
+        }
+        validate_mint_extension_combination::<V>(&state)?;
+        state.try_get_new_account_len_for_variable_len_extension(extension)?
+    };
+
+    if data.len() < new_len {
+        data.resize(new_len, 0);
+    }
+    // Append-created buffers become extended only after resizing.
+    ensure_mint_extension_layout(data)?;
+
+    let mut state = StateWithExtensionsMut::<spl_token_2022_interface::state::Mint>::unpack(data)?;
+    state.init_variable_len_extension(extension, false)?;
+    Ok(true)
+}
+
+pub(crate) fn init_fixed_token_account_extension_data<V>(
+    data: &mut Vec<u8>,
+    extension: V,
+) -> Result<bool, ProgramError>
+where
+    V: Extension + bytemuck::Pod + Default + Copy,
+{
+    // Builder-created buffers can already be extended before their first TLV parse.
+    ensure_token_account_extension_layout(data)?;
+    let new_len = {
+        let state = StateWithExtensions::<spl_token_2022_interface::state::Account>::unpack(data)?;
+        if state.get_extension_bytes::<V>().is_ok() {
+            return Ok(false);
+        }
+        state.try_get_new_account_len::<V>()?
+    };
+
+    if data.len() < new_len {
+        data.resize(new_len, 0);
+    }
+    // Append-created buffers become extended only after resizing.
+    ensure_token_account_extension_layout(data)?;
+
+    let mut state =
+        StateWithExtensionsMut::<spl_token_2022_interface::state::Account>::unpack(data)?;
+    let extension_ref = state.init_extension::<V>(false)?;
+    *extension_ref = extension;
+    Ok(true)
+}
+
 fn append_fixed_token_account_extension<V>(
     svm: &mut LiteSVM,
     pubkey: &Pubkey,
@@ -125,29 +238,10 @@ where
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let new_len = {
-        let state =
-            StateWithExtensions::<spl_token_2022_interface::state::Account>::unpack(&account.data)?;
-        if state.get_extension_bytes::<V>().is_ok() {
-            return Ok(());
-        }
-        state.try_get_new_account_len::<V>()?
-    };
-
-    if account.data.len() < new_len {
-        account.data.resize(new_len, 0);
+    if init_fixed_token_account_extension_data(&mut account.data, extension)? {
+        put_account(svm, pubkey, account)?;
     }
-    spl_token_2022_interface::extension::set_account_type::<
-        spl_token_2022_interface::state::Account,
-    >(&mut account.data)?;
-
-    let mut state = StateWithExtensionsMut::<spl_token_2022_interface::state::Account>::unpack(
-        &mut account.data,
-    )?;
-    let extension_ref = state.init_extension::<V>(false)?;
-    *extension_ref = extension;
-
-    put_account(svm, pubkey, account)
+    Ok(())
 }
 
 fn validate_mint_extension_combination<V>(
@@ -179,29 +273,10 @@ where
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let new_len = {
-        let state =
-            StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(&account.data)?;
-        if state.get_extension_bytes::<V>().is_ok() {
-            return Ok(());
-        }
-        validate_mint_extension_combination::<V>(&state)?;
-        state.try_get_new_account_len::<V>()?
-    };
-
-    if account.data.len() < new_len {
-        account.data.resize(new_len, 0);
+    if init_fixed_mint_extension_data(&mut account.data, extension)? {
+        put_account(svm, pubkey, account)?;
     }
-    spl_token_2022_interface::extension::set_account_type::<spl_token_2022_interface::state::Mint>(
-        &mut account.data,
-    )?;
-
-    let mut state =
-        StateWithExtensionsMut::<spl_token_2022_interface::state::Mint>::unpack(&mut account.data)?;
-    let extension_ref = state.init_extension::<V>(false)?;
-    *extension_ref = extension;
-
-    put_account(svm, pubkey, account)
+    Ok(())
 }
 
 fn append_variable_len_mint_extension_state<V>(
@@ -219,28 +294,10 @@ where
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let new_len = {
-        let state =
-            StateWithExtensions::<spl_token_2022_interface::state::Mint>::unpack(&account.data)?;
-        if state.get_extension_bytes::<V>().is_ok() {
-            return Ok(());
-        }
-        validate_mint_extension_combination::<V>(&state)?;
-        state.try_get_new_account_len_for_variable_len_extension(extension)?
-    };
-
-    if account.data.len() < new_len {
-        account.data.resize(new_len, 0);
+    if init_variable_len_mint_extension_data(&mut account.data, extension)? {
+        put_account(svm, pubkey, account)?;
     }
-    spl_token_2022_interface::extension::set_account_type::<spl_token_2022_interface::state::Mint>(
-        &mut account.data,
-    )?;
-
-    let mut state =
-        StateWithExtensionsMut::<spl_token_2022_interface::state::Mint>::unpack(&mut account.data)?;
-    state.init_variable_len_extension(extension, false)?;
-
-    put_account(svm, pubkey, account)
+    Ok(())
 }
 
 fn append_mint_extension<V>(
