@@ -8,6 +8,12 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck = { workspace = true }
 litesvm = { workspace = true }
+solana-program-error = { workspace = true }
+solana-program-pack = { workspace = true }
 solana-sdk = { workspace = true }
-spl-token-2022 = { workspace = true, features = ["no-entrypoint"] }
+spl-token-group-interface = { workspace = true }
+spl-token-metadata-interface = { workspace = true }
+spl-token-2022-interface = { workspace = true }
+spl-type-length-value = { workspace = true }
