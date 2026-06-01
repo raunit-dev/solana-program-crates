@@ -1,15 +1,14 @@
 use core::ops::Deref;
 use pinocchio::error::ProgramError;
 use solana_account_view::{AccountView, Ref};
-use spl_token_2022_interface::{
-    extension::{BaseStateWithExtensions, StateWithExtensions},
-    state::{Account, Mint as InterfaceMint},
-};
 
 pub use pinocchio_token_2022::instructions;
 pub use spl_token_2022_interface::extension::{self, ExtensionType};
 
 use pinocchio_token_2022::state::TokenAccount as T22TokenAccount;
+
+const EXTENSION_TYPE_LEN: usize = 2;
+const EXTENSION_LENGTH_LEN: usize = 2;
 
 /// SPL Token-2022 account-type byte after the 165-byte base state (`AccountType::Mint`).
 const T22_ACCOUNT_TYPE_MINT: u8 = 1;
@@ -117,19 +116,44 @@ impl Deref for Mint<'_> {
 /// Iterate over TLV extension data and return all extension types present.
 /// Works for both Token-2022 Mint and TokenAccount accounts.
 pub fn get_all_extensions(acc_data_bytes: &[u8]) -> Result<Vec<ExtensionType>, ProgramError> {
-    if acc_data_bytes.len() <= T22TokenAccount::BASE_LEN {
+    let ext_start = T22TokenAccount::BASE_LEN + 1;
+    if acc_data_bytes.len() <= ext_start {
         return Ok(Vec::new());
     }
-
-    match acc_data_bytes[T22TokenAccount::BASE_LEN] {
-        T22_ACCOUNT_TYPE_MINT => {
-            StateWithExtensions::<InterfaceMint>::unpack(acc_data_bytes)?.get_extension_types()
-        }
-        T22_ACCOUNT_TYPE_TOKEN_ACCOUNT => {
-            StateWithExtensions::<Account>::unpack(acc_data_bytes)?.get_extension_types()
-        }
-        _ => Err(ProgramError::InvalidAccountData),
+    let account_type_byte = acc_data_bytes[T22TokenAccount::BASE_LEN];
+    if account_type_byte != T22_ACCOUNT_TYPE_MINT
+        && account_type_byte != T22_ACCOUNT_TYPE_TOKEN_ACCOUNT
+    {
+        return Err(ProgramError::InvalidAccountData);
     }
+
+    let ext_bytes = &acc_data_bytes[ext_start..];
+    let mut extension_types = Vec::new();
+    let mut start = 0;
+    while start + EXTENSION_TYPE_LEN <= ext_bytes.len() {
+        let type_start = start;
+        let length_start = type_start + EXTENSION_TYPE_LEN;
+        let value_start = length_start + EXTENSION_LENGTH_LEN;
+        let ext_type = ExtensionType::try_from(&ext_bytes[type_start..length_start])?;
+        if ext_type == ExtensionType::Uninitialized {
+            return Ok(extension_types);
+        }
+        if value_start > ext_bytes.len() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let len_bytes: [u8; EXTENSION_LENGTH_LEN] = ext_bytes[length_start..value_start]
+            .try_into()
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        let ext_len = u16::from_le_bytes(len_bytes) as usize;
+        let value_end = value_start.saturating_add(ext_len);
+        if value_end > ext_bytes.len() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        extension_types.push(ext_type);
+        start = value_end;
+    }
+
+    Ok(extension_types)
 }
 
 #[cfg(test)]
@@ -368,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_get_all_extensions_no_extensions() {
-        let data = vec![0u8; T22TokenAccount::BASE_LEN];
+        let data = vec![0u8; T22TokenAccount::BASE_LEN + 1];
         assert_eq!(get_all_extensions(&data).unwrap(), vec![]);
     }
 
