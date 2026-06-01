@@ -130,27 +130,15 @@ pub fn get_all_extensions(acc_data_bytes: &[u8]) -> Result<Vec<ExtensionType>, P
     let ext_bytes = &acc_data_bytes[ext_start..];
     let mut extension_types = Vec::new();
     let mut start = 0;
-    while start + EXTENSION_TYPE_LEN <= ext_bytes.len() {
-        let type_start = start;
-        let length_start = type_start + EXTENSION_TYPE_LEN;
-        let value_start = length_start + EXTENSION_LENGTH_LEN;
-        let ext_type = ExtensionType::try_from(&ext_bytes[type_start..length_start])?;
-        if ext_type == ExtensionType::Uninitialized {
-            return Ok(extension_types);
-        }
-        if value_start > ext_bytes.len() {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        let len_bytes: [u8; EXTENSION_LENGTH_LEN] = ext_bytes[length_start..value_start]
+    while start + EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN <= ext_bytes.len() {
+        let ext_type = ExtensionType::try_from(&ext_bytes[start..start + EXTENSION_TYPE_LEN])?;
+        let len_bytes: [u8; EXTENSION_LENGTH_LEN] = ext_bytes
+            [start + EXTENSION_TYPE_LEN..start + EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN]
             .try_into()
             .map_err(|_| ProgramError::InvalidAccountData)?;
         let ext_len = u16::from_le_bytes(len_bytes) as usize;
-        let value_end = value_start.saturating_add(ext_len);
-        if value_end > ext_bytes.len() {
-            return Err(ProgramError::InvalidAccountData);
-        }
         extension_types.push(ext_type);
-        start = value_end;
+        start += EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN + ext_len;
     }
 
     Ok(extension_types)
