@@ -141,6 +141,7 @@ impl TokenAccountBuilder {
 
 enum TokenAccountExtensionState {
     TransferFeeAmount(TransferFeeAmount),
+    // Box the large confidential transfer payload so this enum stays small.
     ConfidentialTransferAccount(Box<ConfidentialTransferAccount>),
     ImmutableOwner(ImmutableOwner),
     MemoTransfer(MemoTransfer),
