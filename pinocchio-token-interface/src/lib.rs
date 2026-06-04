@@ -3,6 +3,7 @@ use pinocchio::error::ProgramError;
 use solana_account_view::{AccountView, Ref};
 
 pub use pinocchio_token_2022::instructions;
+pub use spl_token_2022_interface::extension::{self, ExtensionType};
 
 use pinocchio_token_2022::state::Account as T22TokenAccount;
 
@@ -13,38 +14,6 @@ const EXTENSION_LENGTH_LEN: usize = 2;
 const T22_ACCOUNT_TYPE_MINT: u8 = 1;
 /// SPL Token-2022 account-type byte for a token holding account (`AccountType::Account`).
 const T22_ACCOUNT_TYPE_TOKEN_ACCOUNT: u8 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExtensionType {
-    TransferFeeConfig,
-    MintCloseAuthority,
-    ConfidentialTransferMint,
-    PermanentDelegate,
-    TransferHook,
-    ConfidentialTransferFeeConfig,
-    MetadataPointer,
-    TokenMetadata,
-    GroupPointer,
-    TokenGroup,
-}
-
-impl ExtensionType {
-    fn from_bytes(b: [u8; 2]) -> Option<Self> {
-        match u16::from_le_bytes(b) {
-            1 => Some(Self::TransferFeeConfig),
-            3 => Some(Self::MintCloseAuthority),
-            4 => Some(Self::ConfidentialTransferMint),
-            12 => Some(Self::PermanentDelegate),
-            14 => Some(Self::TransferHook),
-            16 => Some(Self::ConfidentialTransferFeeConfig),
-            18 => Some(Self::MetadataPointer),
-            19 => Some(Self::TokenMetadata),
-            20 => Some(Self::GroupPointer),
-            21 => Some(Self::TokenGroup),
-            _ => None,
-        }
-    }
-}
 
 pub struct TokenAccount<'info>(Ref<'info, T22TokenAccount>);
 
@@ -116,16 +85,13 @@ pub fn get_all_extensions(acc_data_bytes: &[u8]) -> Result<Vec<ExtensionType>, P
     {
         return Err(ProgramError::InvalidAccountData);
     }
+
     let ext_bytes = &acc_data_bytes[ext_start..];
     let mut extension_types = Vec::new();
     let mut start = 0;
     while start + EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN <= ext_bytes.len() {
-        let type_bytes: [u8; 2] = ext_bytes[start..start + EXTENSION_TYPE_LEN]
-            .try_into()
-            .map_err(|_| ProgramError::InvalidAccountData)?;
-        let ext_type =
-            ExtensionType::from_bytes(type_bytes).ok_or(ProgramError::InvalidAccountData)?;
-        let len_bytes: [u8; 2] = ext_bytes
+        let ext_type = ExtensionType::try_from(&ext_bytes[start..start + EXTENSION_TYPE_LEN])?;
+        let len_bytes: [u8; EXTENSION_LENGTH_LEN] = ext_bytes
             [start + EXTENSION_TYPE_LEN..start + EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN]
             .try_into()
             .map_err(|_| ProgramError::InvalidAccountData)?;
@@ -133,6 +99,7 @@ pub fn get_all_extensions(acc_data_bytes: &[u8]) -> Result<Vec<ExtensionType>, P
         extension_types.push(ext_type);
         start += EXTENSION_TYPE_LEN + EXTENSION_LENGTH_LEN + ext_len;
     }
+
     Ok(extension_types)
 }
 
